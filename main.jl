@@ -87,4 +87,12 @@ end
 
 Base.getindex(t::Table, r::UnitRange) = take(drop(t, r.start - 1), r.stop - r.start + 1)
 
+Base.setindex!{T}(t::Table{T}, r::T, i::Integer) = begin
+  0 < i <= length(t) || throw(BoundsError(t, i))
+  fields = fieldnames(T)
+  params = join(map(f -> string(f, "=?"), fields), ',')
+  values = map(f -> r.(f), fields)
+  SQLite.query(t.db, "UPDATE \"$T\" SET $params LIMIT 1 OFFSET $(i - 1)", values)
+end
+
 sql{T}(t::Table{T}) = "SELECT * FROM \"$T\""
