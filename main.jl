@@ -1,5 +1,5 @@
-import SQLite
-const DB = SQLite.DB
+@require "github.com/jkroso/abstract-ast.jl" => AST
+@require "github.com/JuliaDB/SQLite.jl" => SQLite DB
 
 sqltype(::Type) = "BLOB"
 sqltype(::Type{Void}) = "NULL"
@@ -8,33 +8,37 @@ sqltype{T<:Integer}(::Type{T}) = "INTEGER"
 sqltype{T<:Real}(::Type{T}) = "REAL"
 sqltype(t::TypeVar) = sqltype(t.ub)
 
-type Table{T}
+abstract AbstractTable{T}
+
+immutable Table{T} <: AbstractTable{T}
   db::DB
   width::UInt8
 end
 
 call{T}(::Type{Table{T}}, db::DB) = begin
   fields = fieldnames(T)
-  types = map(s->fieldtype(T, s), fields)
-  decs = [string(f, ' ', sqltype(t)) for (f, t) in zip(fields, types)]
+  types = map(s -> fieldtype(T, s), fields)
+  decs = map((f, t) -> string(f, ' ', sqltype(t)), fields, types)
   SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(decs, ',')))")
   Table{T}(db, length(fields))
 end
 
-Base.eltype{T}(::Table{T}) = T
-Base.length{T}(t::Table{T}) = SQLite.query(t.db, "SELECT count(*) from \"$T\"").data[1][1] |> get
-Base.endof(t::Table) = length(t)
+Base.eltype{T}(::AbstractTable{T}) = T
+Base.length(t::AbstractTable) =
+  get(SQLite.query(db(t), "SELECT count(*) from \"$(name(t))\" $(where(t))").data[1][1], 0)
+Base.endof(t::AbstractTable) = length(t)
+width(t::Table) = t.width
 
-Base.start{T}(t::Table{T}) = begin
-  stmt = SQLite.Stmt(t.db, sql(t))
+Base.start{T}(t::AbstractTable{T}) = begin
+  stmt = SQLite.Stmt(db(t), sql(t))
   status = SQLite.execute!(stmt)
   stmt.handle, status
 end
-Base.done{T}(::Table{T}, state) = state[2] == SQLite.SQLITE_DONE
-Base.next{T}(t::Table{T}, state) = begin
+Base.done{T}(::AbstractTable{T}, state) = state[2] == SQLite.SQLITE_DONE
+Base.next{T}(t::AbstractTable{T}, state) = begin
   handle, status = state
-  status == SQLite.SQLITE_ROW || SQLite.sqliteerror(db(t))
-  values = map(1:t.width) do i
+  status == SQLite.SQLITE_ROW || SQLite.sqliteerror(t.db)
+  values = map(1:width(t)) do i
     juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
     SQLite.sqlitevalue(juliatype, handle, i)
   end
@@ -43,7 +47,7 @@ end
 
 Base.summary{T}(t::Table{T}) = string(length(t), 'x', t.width, ' ', T, " Table")
 
-Base.show{T}(io::IO, t::Table{T}) = begin
+Base.show{T}(io::IO, t::AbstractTable{T}) = begin
   println(io, summary(t))
   fields = fieldnames(T)
   rows = map(row -> map(f -> row.(f), fields), t)
@@ -91,8 +95,43 @@ Base.setindex!{T}(t::Table{T}, r::T, i::Integer) = begin
   0 < i <= length(t) || throw(BoundsError(t, i))
   fields = fieldnames(T)
   params = join(map(f -> string(f, "=?"), fields), ',')
-  values = map(f -> r.(f), fields)
-  SQLite.query(t.db, "UPDATE \"$T\" SET $params LIMIT 1 OFFSET $(i - 1)", values)
+  values = map(f -> getfield(r, f), fields)
+  SQLite.query(t.db, "UPDATE \"$(name(t))\" SET $params LIMIT 1 OFFSET $(i - 1)", values)
 end
 
-sql{T}(t::Table{T}) = "SELECT * FROM \"$T\""
+immutable FilteredTable{T} <: AbstractTable{T}
+  table::AbstractTable{T}
+  where::AbstractString
+end
+
+Base.summary{T}(t::FilteredTable{T}) = string(length(t), 'x', width(t), ' ', T, " Table ", where(t))
+width(t::FilteredTable) = width(t.table)
+
+sql(t::AbstractTable) = "SELECT $(selection(t)) FROM \"$(name(t))\" $(where(t))"
+selection(::AbstractTable) = "*"
+name{T}(::AbstractTable{T}) = string(T)
+db(t::FilteredTable) = db(t.table)
+db(t::Table) = t.db
+
+Base.filter(f::Function, t::Table) = begin
+  sql = AST.getAST(f) |> AST.simplify |> where
+  FilteredTable(t, sql)
+end
+
+where(t::AbstractTable) = ""
+where(t::FilteredTable) = string("WHERE ", t.where)
+where(f::AST.FunctionExpression) = where(f.body.value, f.params[1].name)
+where(a::AST.Call, tablename::Symbol) = begin
+  if a.callee == AST.GlobalReference(Base, :getfield) && a.args[1] == AST.LocalReference(tablename)
+    where(a.args[2], tablename)
+  else
+    args = map(a -> where(a, tablename), a.args)
+    string(args[1], ' ', where(a.callee, tablename), ' ', args[2])
+  end
+end
+where(a::AST.VariableReference, tablename::Symbol) = sqlfunctions[a.name]
+where(a::AST.Literal{ASCIIString}, tablename::Symbol) = string('\'', a.value, '\'')
+where(a::AST.Literal, tablename::Symbol) = string(a.value)
+
+const sqlfunctions = Dict{Symbol, Symbol}(
+  symbol("==") => symbol("="))
