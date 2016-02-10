@@ -153,16 +153,22 @@ where(t::AbstractTable) = ""
 where(t::FilteredTable) = string("WHERE ", t.where)
 where(f::AST.FunctionExpression) = where(f.body.value, f.params[1].name)
 where(a::AST.Call, tablename::Symbol) = begin
-  if a.callee == AST.GlobalReference(Base, :getfield) && a.args[1] == AST.LocalReference(tablename)
-    where(a.args[2], tablename)
-  else
+  if haskey(sqlfunctions, a.callee.name)
     args = map(a -> where(a, tablename), a.args)
     string(args[1], ' ', where(a.callee, tablename), ' ', args[2])
+  elseif a.callee == AST.GlobalReference(Base, :getfield) && a.args[1] == AST.LocalReference(tablename)
+    where(a.args[2], tablename)
+  else
+    where(AST.Literal(evalAST(a)), tablename)
   end
 end
-where(a::AST.VariableReference, tablename::Symbol) = sqlfunctions[a.name]
+where(a::AST.GlobalReference, tablename::Symbol) = sqlfunctions[a.name]
 where(a::AST.Literal{ASCIIString}, tablename::Symbol) = string('\'', a.value, '\'')
 where(a::AST.Literal, tablename::Symbol) = string(a.value)
 
 const sqlfunctions = Dict{Symbol, Symbol}(
   symbol("==") => symbol("="))
+
+evalAST(a::AST.Call) = evalAST(a.callee)(map(evalAST, a.args)...)
+evalAST(a::AST.GlobalReference) = a.mod.(a.name)
+evalAST(a::AST.Literal) = a.value
