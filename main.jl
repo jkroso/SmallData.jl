@@ -1,5 +1,7 @@
 @require "github.com/jkroso/abstract-ast.jl" => AST
-@require "github.com/JuliaDB/SQLite.jl" => SQLite DB
+@require "github.com/quinnj/SQLite.jl" => SQLite DB
+
+const db_id = WeakKeyDict{Any,Int}()
 
 sqltype(::Type) = "BLOB"
 sqltype(::Type{Void}) = "NULL"
@@ -9,18 +11,34 @@ sqltype{T<:Real}(::Type{T}) = "REAL"
 sqltype(t::TypeVar) = sqltype(t.ub)
 
 abstract AbstractTable{T}
+abstract Table{T} <: AbstractTable{T}
+abstract TableView{T} <: AbstractTable{T}
 
-immutable Table{T} <: AbstractTable{T}
+immutable ValueTable{T} <: Table{T}
   db::DB
   width::UInt8
+end
+
+immutable EntityTable{T} <: Table{T}
+  db::DB
+  width::UInt8
+end
+
+immutable FilteredTable{T} <: TableView{T}
+  table::AbstractTable{T}
+  where::AbstractString
 end
 
 call{T}(::Type{Table{T}}, db::DB) = begin
   fields = fieldnames(T)
   types = map(s -> fieldtype(T, s), fields)
-  decs = map((f, t) -> string(f, ' ', sqltype(t)), fields, types)
-  SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(decs, ',')))")
-  Table{T}(db, length(fields))
+  declarations = map((f, t) -> string(f, ' ', sqltype(t)), fields, types)
+  SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(declarations, ',')))")
+  if T.mutable
+    EntityTable{T}(db, length(fields))
+  else
+    ValueTable{T}(db, length(fields))
+  end
 end
 
 Base.eltype{T}(::AbstractTable{T}) = T
@@ -28,6 +46,7 @@ Base.length(t::AbstractTable) =
   get(SQLite.query(db(t), "SELECT count(*) from \"$(name(t))\" $(where(t))").data[1][1], 0)
 Base.endof(t::AbstractTable) = length(t)
 width(t::Table) = t.width
+width(t::TableView) = width(t.table)
 
 Base.start{T}(t::AbstractTable{T}) = begin
   stmt = SQLite.Stmt(db(t), sql(t))
@@ -37,15 +56,28 @@ end
 Base.done{T}(::AbstractTable{T}, state) = state[2] == SQLite.SQLITE_DONE
 Base.next{T}(t::AbstractTable{T}, state) = begin
   handle, status = state
-  status == SQLite.SQLITE_ROW || SQLite.sqliteerror(t.db)
+  status == SQLite.SQLITE_ROW || SQLite.sqliteerror(db(t))
   values = map(1:width(t)) do i
     juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
     SQLite.sqlitevalue(juliatype, handle, i)
   end
   T(values...), (handle, SQLite.sqlite3_step(handle))
 end
+Base.next{T}(t::EntityTable{T}, state) = begin
+  handle, status = state
+  status == SQLite.SQLITE_ROW || SQLite.sqliteerror(db(t))
+  values = map(1:width(t)) do i
+    juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
+    SQLite.sqlitevalue(juliatype, handle, i)
+  end
+  id = SQLite.sqlitevalue(Int, handle, width(t) + 1)
+  row = T(values...)
+  db_id[row] = id
+  row, (handle, SQLite.sqlite3_step(handle))
+end
 
-Base.summary{T}(t::Table{T}) = string(length(t), 'x', t.width, ' ', T, " Table")
+Base.summary{T}(t::AbstractTable{T}) = string(length(t), 'x', width(t), ' ', T, " Table")
+Base.summary{T}(t::FilteredTable{T}) = string(length(t), 'x', width(t), ' ', T, " Table ", where(t))
 
 Base.show{T}(io::IO, t::AbstractTable{T}) = begin
   println(io, summary(t))
@@ -82,6 +114,12 @@ Base.push!{T}(t::Table{T}, row::T) = begin
   t
 end
 
+Base.push!{T}(t::EntityTable{T}, row::T) = begin
+  invoke(push!, (Table{T}, T), t, row)
+  db_id[row] = get(SQLite.query(t.db, "SELECT last_insert_rowid() FROM \"$T\" LIMIT 1").data[1][1])
+  t
+end
+
 Base.getindex(t::Table, i::Integer) = begin
   0 < i <= length(t) || throw(BoundsError(t, i))
   stmt = SQLite.Stmt(t.db, "$(sql(t)) LIMIT 1 OFFSET $(i - 1)")
@@ -89,9 +127,9 @@ Base.getindex(t::Table, i::Integer) = begin
   next(t, (stmt.handle, status))[1]
 end
 
-Base.getindex(t::Table, r::UnitRange) = take(drop(t, r.start - 1), r.stop - r.start + 1)
+Base.getindex(t::AbstractTable, r::UnitRange) = take(drop(t, r.start - 1), r.stop - r.start + 1)
 
-Base.setindex!{T}(t::Table{T}, r::T, i::Integer) = begin
+Base.setindex!{T}(t::Table{T} , r::T, i::Integer) = begin
   0 < i <= length(t) || throw(BoundsError(t, i))
   fields = fieldnames(T)
   params = join(map(f -> string(f, "=?"), fields), ',')
@@ -99,18 +137,11 @@ Base.setindex!{T}(t::Table{T}, r::T, i::Integer) = begin
   SQLite.query(t.db, "UPDATE \"$(name(t))\" SET $params LIMIT 1 OFFSET $(i - 1)", values)
 end
 
-immutable FilteredTable{T} <: AbstractTable{T}
-  table::AbstractTable{T}
-  where::AbstractString
-end
-
-Base.summary{T}(t::FilteredTable{T}) = string(length(t), 'x', width(t), ' ', T, " Table ", where(t))
-width(t::FilteredTable) = width(t.table)
-
 sql(t::AbstractTable) = "SELECT $(selection(t)) FROM \"$(name(t))\" $(where(t))"
+sql(t::EntityTable) = "SELECT $(selection(t)),rowid FROM \"$(name(t))\" $(where(t))"
 selection(::AbstractTable) = "*"
 name{T}(::AbstractTable{T}) = string(T)
-db(t::FilteredTable) = db(t.table)
+db(t::TableView) = db(t.table)
 db(t::Table) = t.db
 
 Base.filter(f::Function, t::Table) = begin
