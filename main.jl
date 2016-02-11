@@ -144,31 +144,36 @@ name{T}(::AbstractTable{T}) = string(T)
 db(t::TableView) = db(t.table)
 db(t::Table) = t.db
 
+immutable TableReference <: AST.AST
+  name::Symbol
+end
+
 Base.filter(f::Function, t::Table) = begin
-  sql = AST.getAST(f) |> AST.simplify |> where
-  FilteredTable(t, sql)
+  ast = AST.getAST(f)
+  env = AST.getEnv(f)
+  fn = AST.simplify(ast, env)
+  env[fn.params[1].name] = TableReference(symbol(name(t)))
+  FilteredTable(t, sql(fn.body.value, env))
 end
 
 where(t::AbstractTable) = ""
 where(t::FilteredTable) = string("WHERE ", t.where)
-where(f::AST.FunctionExpression) = where(f.body.value, f.params[1].name)
-where(a::AST.Call, tablename::Symbol) = begin
-  if haskey(sqlfunctions, a.callee.name)
-    args = map(a -> where(a, tablename), a.args)
-    string(args[1], ' ', where(a.callee, tablename), ' ', args[2])
-  elseif a.callee == AST.GlobalReference(Base, :getfield) && a.args[1] == AST.LocalReference(tablename)
-    where(a.args[2], tablename)
+
+sql(a::AST.Call, env::AST.Env) = begin
+  if a.callee.name == :getfield && isa(env[a.args[1].name], TableReference)
+    sql(a.args[2], env)
+  elseif haskey(sqlfunctions, a.callee.name)
+    args = map(a -> sql(a, env), a.args)
+    string(args[1], ' ', sql(a.callee, env), ' ', args[2])
   else
-    where(AST.Literal(evalAST(a)), tablename)
+    sql(AST.interpret(a, env))
   end
 end
-where(a::AST.GlobalReference, tablename::Symbol) = sqlfunctions[a.name]
-where(a::AST.Literal{ASCIIString}, tablename::Symbol) = string('\'', a.value, '\'')
-where(a::AST.Literal, tablename::Symbol) = string(a.value)
+sql(a::AST.GlobalReference, env::AST.Env) = sqlfunctions[a.name]
+sql(a::AST.LocalReference, env::AST.Env) = string('"', a.name, '"')
+sql(a::AST.Literal, env::AST.Env) = sql(a.value)
+sql(s::AbstractString) = string('\'', s, '\'')
+sql(s::Any) = string(s)
 
 const sqlfunctions = Dict{Symbol, Symbol}(
   symbol("==") => symbol("="))
-
-evalAST(a::AST.Call) = evalAST(a.callee)(map(evalAST, a.args)...)
-evalAST(a::AST.GlobalReference) = a.mod.(a.name)
-evalAST(a::AST.Literal) = a.value
