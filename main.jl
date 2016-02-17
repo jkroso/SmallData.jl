@@ -175,5 +175,4 @@ sql(a::AST.Literal, env::AST.Env) = sql(a.value)
 sql(s::AbstractString) = string('\'', s, '\'')
 sql(s::Any) = string(s)
 
-const sqlfunctions = Dict{Symbol, Symbol}(
-  symbol("==") => symbol("="))
+const sqlfunctions = Dict(symbol("==") => symbol("="))
