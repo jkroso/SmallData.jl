@@ -153,7 +153,11 @@ Base.filter(f::Function, t::Table) = begin
   env = AST.getEnv(f)
   fn = AST.simplify(ast, env)
   env[fn.params[1].name] = TableReference(symbol(name(t)))
-  FilteredTable(t, sql(fn.body.value, env))
+  try
+    FilteredTable(t, sql(fn.body.value, env))
+  catch
+    invoke(filter, (Function,Any), f, t)
+  end
 end
 
 where(t::AbstractTable) = ""
