@@ -13,17 +13,8 @@ sqltype(t::TypeVar) = sqltype(t.ub)
 abstract AbstractTable{T}
 abstract Table{T} <: AbstractTable{T}
 abstract TableView{T} <: AbstractTable{T}
-
-immutable ValueTable{T} <: Table{T}
-  db::DB
-  width::UInt8
-end
-
-immutable EntityTable{T} <: Table{T}
-  db::DB
-  width::UInt8
-end
-
+immutable ValueTable{T} <: Table{T} db::DB end
+immutable EntityTable{T} <: Table{T} db::DB end
 immutable FilteredTable{T} <: TableView{T}
   table::AbstractTable{T}
   where::AbstractString
@@ -37,18 +28,14 @@ call{T}(::Type{Table{T}}, db::DB) = begin
   end
   declarations = map((f, t) -> string(f, ' ', sqltype(t)), fields, types)
   SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(declarations, ',')))")
-  if T.mutable
-    EntityTable{T}(db, length(fields))
-  else
-    ValueTable{T}(db, length(fields))
-  end
+  T.mutable ? EntityTable{T}(db) : ValueTable{T}(db)
 end
 
 Base.eltype{T}(::AbstractTable{T}) = T
 Base.length(t::AbstractTable) =
   get(SQLite.query(db(t), "SELECT count(*) from \"$(name(t))\" $(where(t))").data[1][1], 0)
 Base.endof(t::AbstractTable) = length(t)
-width(t::Table) = t.width
+width{T}(t::Table{T}) = length(fieldnames(T))
 width(t::TableView) = width(t.table)
 
 Base.start{T}(t::AbstractTable{T}) = begin
