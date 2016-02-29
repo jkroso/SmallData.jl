@@ -31,7 +31,10 @@ end
 
 call{T}(::Type{Table{T}}, db::DB) = begin
   fields = fieldnames(T)
-  types = map(s -> fieldtype(T, s), fields)
+  types = map(fields) do name
+    t = fieldtype(T, name)
+    t.mutable ? UInt : t
+  end
   declarations = map((f, t) -> string(f, ' ', sqltype(t)), fields, types)
   SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(declarations, ',')))")
   if T.mutable
@@ -59,21 +62,24 @@ Base.next{T}(t::AbstractTable{T}, state) = begin
   status == SQLite.SQLITE_ROW || SQLite.sqliteerror(db(t))
   values = map(1:width(t)) do i
     juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
-    SQLite.sqlitevalue(juliatype, handle, i)
+    value = SQLite.sqlitevalue(juliatype, handle, i)
+    coltype = nthfieldtype(i, T)
+    if juliatype <: Integer && coltype.mutable
+      getentity(Table{coltype}(t.db), value)
+    else
+      value
+    end
   end
   T(values...), (handle, SQLite.sqlite3_step(handle))
 end
+
+nthfieldtype(n::Int, T::DataType) = fieldtype(T, fieldnames(T)[n])
+
 Base.next{T}(t::EntityTable{T}, state) = begin
-  handle, status = state
-  status == SQLite.SQLITE_ROW || SQLite.sqliteerror(db(t))
-  values = map(1:width(t)) do i
-    juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
-    SQLite.sqlitevalue(juliatype, handle, i)
-  end
-  id = SQLite.sqlitevalue(Int, handle, width(t) + 1)
-  row = T(values...)
+  id = SQLite.sqlitevalue(Int, state[1], width(t) + 1)
+  row, state = invoke(next, (AbstractTable{T}, Tuple), t, state)
   db_id[row] = id
-  row, (handle, SQLite.sqlite3_step(handle))
+  row, state
 end
 
 Base.summary{T}(t::AbstractTable{T}) = string(length(t), 'x', width(t), ' ', T, " Table")
@@ -108,7 +114,10 @@ end
 
 Base.push!{T}(t::Table{T}, row::T) = begin
   columns = fieldnames(T)
-  values = map(c -> row.(c), columns)
+  values = map(columns) do c
+    value = getfield(row, c)
+    fieldtype(T, c).mutable ? db_id[value] : value
+  end
   params = join(repeated('?', length(columns)), ',')
   SQLite.query(t.db, "INSERT INTO \"$T\" VALUES ($params)", values)
   t
@@ -135,6 +144,12 @@ Base.setindex!{T}(t::Table{T} , r::T, i::Integer) = begin
   params = join(map(f -> string(f, "=?"), fields), ',')
   values = map(f -> getfield(r, f), fields)
   SQLite.query(t.db, "UPDATE \"$(name(t))\" SET $params LIMIT 1 OFFSET $(i - 1)", values)
+end
+
+getentity{T}(t::EntityTable{T}, i::Integer) = begin
+  stmt = SQLite.Stmt(t.db, "SELECT *,rowid FROM \"$T\" WHERE rowid=$i LIMIT 1")
+  status = SQLite.execute!(stmt)
+  next(t, (stmt.handle, status))[1]
 end
 
 sql(t::AbstractTable) = "SELECT $(selection(t)) FROM \"$(name(t))\" $(where(t))"
