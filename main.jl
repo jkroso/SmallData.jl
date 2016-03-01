@@ -26,7 +26,7 @@ call{T}(::Type{Table{T}}, db::DB) = begin
     t = fieldtype(T, name)
     t.mutable ? UInt : t
   end
-  declarations = map((f, t) -> string(f, ' ', sqltype(t)), fields, types)
+  declarations = map((f, t) -> string('"', f, '"', ' ', sqltype(t)), fields, types)
   SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(declarations, ',')))")
   T.mutable ? EntityTable{T}(db) : ValueTable{T}(db)
 end
@@ -103,7 +103,7 @@ Base.push!{T}(t::Table{T}, row::T) = begin
   columns = fieldnames(T)
   values = map(columns) do c
     value = getfield(row, c)
-    fieldtype(T, c).mutable ? db_id[value] : value
+    get(db_id, value, value)
   end
   params = join(repeated('?', length(columns)), ',')
   SQLite.query(t.db, "INSERT INTO \"$T\" VALUES ($params)", values)
