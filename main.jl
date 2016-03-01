@@ -24,6 +24,7 @@ call{T}(::Type{Table{T}}, db::DB) = begin
   fields = fieldnames(T)
   types = map(fields) do name
     t = fieldtype(T, name)
+    t <: Vector && eltype(t).mutable && return Vector{UInt}
     t.mutable ? UInt : t
   end
   declarations = map((f, t) -> string('"', f, '"', ' ', sqltype(t)), fields, types)
@@ -33,9 +34,9 @@ end
 
 Base.eltype{T}(::AbstractTable{T}) = T
 Base.length(t::AbstractTable) =
-  get(SQLite.query(db(t), "SELECT count(*) from \"$(name(t))\" $(where(t))").data[1][1], 0)
+  get(SQLite.query(db(t), "SELECT count(*) FROM \"$(name(t))\" $(where(t))").data[1][1], 0)
 Base.endof(t::AbstractTable) = length(t)
-width{T}(t::Table{T}) = length(fieldnames(T))
+width{T}(t::Table{T}) = nfields(T)
 width(t::TableView) = width(t.table)
 
 Base.start{T}(t::AbstractTable{T}) = begin
@@ -52,7 +53,10 @@ Base.next{T}(t::AbstractTable{T}, state) = begin
     value = SQLite.sqlitevalue(juliatype, handle, i)
     coltype = nthfieldtype(i, T)
     if juliatype <: Integer && coltype.mutable
-      getentity(Table{coltype}(t.db), value)
+      getentity(Table{coltype}(db(t)), value)
+    elseif coltype <: Vector && eltype(coltype).mutable
+      elT = eltype(coltype)
+      elT[getentity(Table{elT}(db(t)), id) for id in value]
     else
       value
     end
@@ -100,12 +104,15 @@ showrow(io::IO, row::AbstractArray, widths::AbstractArray) = begin
 end
 
 Base.push!{T}(t::Table{T}, row::T) = begin
-  columns = fieldnames(T)
-  values = map(columns) do c
+  values = map(fieldnames(T)) do c
     value = getfield(row, c)
-    get(db_id, value, value)
+    if isa(value, Vector)
+      UInt[db_id[v] for v in value]
+    else
+      get(db_id, value, value)
+    end
   end
-  params = join(repeated('?', length(columns)), ',')
+  params = join(repeated('?', width(t)), ',')
   SQLite.query(t.db, "INSERT INTO \"$T\" VALUES ($params)", values)
   t
 end
