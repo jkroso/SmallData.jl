@@ -3,6 +3,11 @@
 
 const db_id = WeakKeyDict{Any,Int}()
 
+table_exists(db::DB, T::DataType) = begin
+  stmt = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='$T'"
+  SQLite.query(db, stmt).data[1][1]|>get == 1
+end
+
 sqltype(::Type) = "BLOB"
 sqltype(::Type{Void}) = "NULL"
 sqltype{T<:AbstractString}(::Type{T}) = "TEXT"
@@ -24,8 +29,13 @@ call{T}(::Type{Table{T}}, db::DB) = begin
   fields = fieldnames(T)
   types = map(fields) do name
     t = fieldtype(T, name)
-    t <: Vector && eltype(t).mutable && return Vector{UInt}
-    t.mutable ? UInt : t
+    if t <: Vector && table_exists(db, eltype(t))
+      Vector{UInt}
+    elseif table_exists(db, t)
+      UInt
+    else
+      t
+    end
   end
   declarations = map((f, t) -> string('"', f, '"', ' ', sqltype(t)), fields, types)
   SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(declarations, ',')))")
@@ -52,9 +62,9 @@ Base.next{T}(t::AbstractTable{T}, state) = begin
     juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
     value = SQLite.sqlitevalue(juliatype, handle, i)
     coltype = nthfieldtype(i, T)
-    if juliatype <: Integer && coltype.mutable
+    if juliatype <: Integer && table_exists(db(t), coltype)
       getentity(Table{coltype}(db(t)), value)
-    elseif coltype <: Vector && eltype(coltype).mutable
+    elseif coltype <: Vector && table_exists(db(t), eltype(coltype))
       elT = eltype(coltype)
       elT[getentity(Table{elT}(db(t)), id) for id in value]
     else
@@ -106,10 +116,12 @@ end
 Base.push!{T}(t::Table{T}, row::T) = begin
   values = map(fieldnames(T)) do c
     value = getfield(row, c)
-    if isa(value, Vector)
+    if isa(value, Vector) && table_exists(db(t), eltype(value))
       UInt[db_id[v] for v in value]
+    elseif table_exists(db(t), typeof(value))
+      db_id[value]
     else
-      get(db_id, value, value)
+      value
     end
   end
   params = join(repeated('?', width(t)), ',')
