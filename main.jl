@@ -61,7 +61,7 @@ Base.next{T}(t::AbstractTable{T}, state) = begin
   values = map(1:width(t)) do i
     juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
     value = SQLite.sqlitevalue(juliatype, handle, i)
-    coltype = nthfieldtype(i, T)
+    coltype = fieldtype(T, i)
     if juliatype <: Integer && table_exists(db(t), coltype)
       getentity(Table{coltype}(db(t)), value)
     elseif coltype <: Vector && table_exists(db(t), eltype(coltype))
@@ -73,8 +73,6 @@ Base.next{T}(t::AbstractTable{T}, state) = begin
   end
   T(values...), (handle, SQLite.sqlite3_step(handle))
 end
-
-nthfieldtype(n::Int, T::DataType) = fieldtype(T, fieldnames(T)[n])
 
 Base.next{T}(t::EntityTable{T}, state) = begin
   id = SQLite.sqlitevalue(Int, state[1], width(t) + 1)
