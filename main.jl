@@ -3,11 +3,6 @@
 
 const db_id = WeakKeyDict{Any,Int}()
 
-table_exists(db::DB, T::DataType) = begin
-  stmt = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='$T'"
-  SQLite.query(db, stmt).data[1][1]|>get == 1
-end
-
 sqltype(::Type) = "BLOB"
 sqltype(::Type{Void}) = "NULL"
 sqltype{T<:AbstractString}(::Type{T}) = "TEXT"
@@ -25,18 +20,13 @@ immutable FilteredTable{T} <: TableView{T}
   where::AbstractString
 end
 
+immutable Reference{T} value::UInt end
+Base.convert{T}(::Type{Reference{T}}, x::T) = Reference{T}(db_id[x])
+deref{T}(r::Reference{T}, db::DB) = getentity(Table{T}(db), r.value)
+
 call{T}(::Type{Table{T}}, db::DB) = begin
   fields = fieldnames(T)
-  types = map(fields) do name
-    t = fieldtype(T, name)
-    if t <: Vector && table_exists(db, eltype(t))
-      Vector{UInt}
-    elseif table_exists(db, t)
-      UInt
-    else
-      t
-    end
-  end
+  types = map(f -> fieldtype(T, f), fields)
   declarations = map((f, t) -> string('"', f, '"', ' ', sqltype(t)), fields, types)
   SQLite.execute!(db, "CREATE TABLE IF NOT EXISTS \"$T\" ($(join(declarations, ',')))")
   T.mutable ? EntityTable{T}(db) : ValueTable{T}(db)
@@ -59,17 +49,8 @@ Base.next{T}(t::AbstractTable{T}, state) = begin
   handle, status = state
   status == SQLite.SQLITE_ROW || SQLite.sqliteerror(db(t))
   values = map(1:width(t)) do i
-    juliatype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
-    value = SQLite.sqlitevalue(juliatype, handle, i)
-    coltype = fieldtype(T, i)
-    if juliatype <: Integer && table_exists(db(t), coltype)
-      getentity(Table{coltype}(db(t)), value)
-    elseif coltype <: Vector && table_exists(db(t), eltype(coltype))
-      elT = eltype(coltype)
-      elT[getentity(Table{elT}(db(t)), id) for id in value]
-    else
-      value
-    end
+    jtype = SQLite.juliatype(SQLite.sqlite3_column_type(handle, i))
+    SQLite.sqlitevalue(jtype, handle, i)
   end
   T(values...), (handle, SQLite.sqlite3_step(handle))
 end
@@ -112,16 +93,7 @@ showrow(io::IO, row::AbstractArray, widths::AbstractArray) = begin
 end
 
 Base.push!{T}(t::Table{T}, row::T) = begin
-  values = map(fieldnames(T)) do c
-    value = getfield(row, c)
-    if isa(value, Vector) && table_exists(db(t), eltype(value))
-      UInt[db_id[v] for v in value]
-    elseif table_exists(db(t), typeof(value))
-      db_id[value]
-    else
-      value
-    end
-  end
+  values = map(i -> getfield(row, i), 1:width(t))
   params = join(repeated('?', width(t)), ',')
   SQLite.query(t.db, "INSERT INTO \"$T\" VALUES ($params)", values)
   t
