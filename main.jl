@@ -34,7 +34,7 @@ end
 
 Base.eltype{T}(::AbstractTable{T}) = T
 Base.length(t::AbstractTable) =
-  get(SQLite.query(db(t), "SELECT count(*) FROM \"$(name(t))\" $(where(t))").data[1][1], 0)
+  get(SQLite.query(db(t), "SELECT count(*) FROM \"$(name(t))\" $(where(t))").columns[1][1], 0)
 Base.endof(t::AbstractTable) = length(t)
 width{T}(t::Table{T}) = nfields(T)
 width(t::TableView) = width(t.table)
@@ -101,7 +101,7 @@ end
 
 Base.push!{T}(t::EntityTable{T}, row::T) = begin
   invoke(push!, (Table{T}, T), t, row)
-  db_id[row] = get(SQLite.query(t.db, "SELECT last_insert_rowid() FROM \"$T\" LIMIT 1").data[1][1])
+  db_id[row] = SQLite.query(t.db, "SELECT last_insert_rowid() FROM \"$T\" LIMIT 1")[1][1]|>get
   t
 end
 
