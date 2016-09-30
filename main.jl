@@ -1,5 +1,4 @@
-@require "github.com/jkroso/abstract-ast.jl" => AST
-@require "github.com/quinnj/SQLite.jl" => SQLite DB
+@require "github.com/JuliaDB/SQLite.jl" => SQLite DB
 
 const db_id = WeakKeyDict{Any,Int}()
 
@@ -24,7 +23,7 @@ immutable Reference{T} value::UInt end
 Base.convert{T}(::Type{Reference{T}}, x::T) = Reference{T}(db_id[x])
 deref{T}(r::Reference{T}, db::DB) = getentity(Table{T}(db), r.value)
 
-call{T}(::Type{Table{T}}, db::DB) = begin
+(::Type{Table{T}}){T}(db::DB) = begin
   fields = fieldnames(T)
   types = map(f -> fieldtype(T, f), fields)
   declarations = map((f, t) -> string('"', f, '"', ' ', sqltype(t)), fields, types)
@@ -68,7 +67,7 @@ Base.summary{T}(t::FilteredTable{T}) = string(length(t), 'x', width(t), ' ', T, 
 Base.show{T}(io::IO, t::AbstractTable{T}) = begin
   println(io, summary(t))
   fields = fieldnames(T)
-  rows = map(row -> map(f -> row.(f), fields), t)
+  rows = map(row -> map(f -> getfield(row, f), fields), t)
   showrows(io, rows, map(string, fields))
 end
 
@@ -93,9 +92,9 @@ showrow(io::IO, row::AbstractArray, widths::AbstractArray) = begin
 end
 
 Base.push!{T}(t::Table{T}, row::T) = begin
-  values = map(i -> getfield(row, i), 1:width(t))
-  params = join(repeated('?', width(t)), ',')
-  SQLite.query(t.db, "INSERT INTO \"$T\" VALUES ($params)", values)
+  SQLite.query(t.db,
+               "INSERT INTO \"$T\" VALUES ($(join(repeated('?', width(t)), ',')))";
+               values=map(i -> getfield(row, i), 1:width(t)))
   t
 end
 
@@ -135,39 +134,5 @@ name{T}(::AbstractTable{T}) = string(T)
 db(t::TableView) = db(t.table)
 db(t::Table) = t.db
 
-immutable TableReference <: AST.AST
-  name::Symbol
-end
-
-Base.filter(f::Function, t::Table) = begin
-  try
-    ast = AST.getAST(f)
-    env = AST.getEnv(f)
-    fn = AST.simplify(ast, env)
-    env[fn.params[1].name] = TableReference(symbol(name(t)))
-    FilteredTable(t, sql(fn.body.value, env))
-  catch
-    invoke(filter, (Function,Any), f, t)
-  end
-end
-
 where(t::AbstractTable) = ""
-where(t::FilteredTable) = string("WHERE ", t.where)
-
-sql(a::AST.Call, env::AST.Env) = begin
-  if a.callee.name == :getfield && isa(env[a.args[1].name], TableReference)
-    sql(a.args[2], env)
-  elseif haskey(sqlfunctions, a.callee.name)
-    args = map(a -> sql(a, env), a.args)
-    string(args[1], ' ', sql(a.callee, env), ' ', args[2])
-  else
-    sql(AST.interpret(a, env))
-  end
-end
-sql(a::AST.GlobalReference, env::AST.Env) = sqlfunctions[a.name]
-sql(a::AST.LocalReference, env::AST.Env) = string('"', a.name, '"')
-sql(a::AST.Literal, env::AST.Env) = sql(a.value)
-sql(s::AbstractString) = string('\'', s, '\'')
-sql(s::Any) = string(s)
-
-const sqlfunctions = Dict(symbol("==") => symbol("="))
+where(t::FilteredTable) = join("WHERE ", t.where)
